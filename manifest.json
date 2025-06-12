@@ -1,0 +1,39 @@
+{
+    "manifest_version": 3,
+    "name": "YouTube Timestamp Bookmarker",
+    "version": "1.0",
+    "description": "Bookmark specific timestamps in YouTube videos.",
+    "permissions": [
+        "tabs",
+        "storage",
+        "notifications",
+        "scripting",
+        "activeTab"
+    ],
+    "host_permissions": [
+        "*://*.youtube.com/*"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "action": {
+        "default_popup": "popup.html",
+        "default_icon": "icon.svg"
+    },
+    "content_scripts": [
+        {
+            "matches": ["*://*.youtube.com/*"],
+            "js": ["content.js"],
+            "run_at": "document_start",
+            "all_frames": false
+        }
+    ],
+    "web_accessible_resources": [{
+        "resources": ["content.js"],
+        "matches": ["*://*.youtube.com/*"]
+    }],
+    "icons": {
+        "128": "icon.svg"
+    }
+}
+  
