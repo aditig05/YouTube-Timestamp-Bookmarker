@@ -1,7 +1,6 @@
 # YouTube Timestamp Bookmarker
 
 A Chrome extension that allows users to bookmark specific timestamps in YouTube videos, making it easier to save and revisit important moments in videos.
-![Screenshot from 2025-06-17 10-55-11](https://github.com/user-attachments/assets/c91298c6-15fa-4dc6-b898-14d3a7601151)
 
 ## Features
 
@@ -18,10 +17,10 @@ A Chrome extension that allows users to bookmark specific timestamps in YouTube 
 - Uses Chrome Storage API for persistent data storage
 - Implements content scripts for YouTube page interaction
 - Real-time communication between popup and content scripts
-- Responsive UI with modern CSS s
+- Responsive UI with modern CSS styling.
 
-![Screenshot from 2025-06-17 10-55-11](https://github.com/user-attachments/assets/d49bd0f0-3425-48ad-ac32-7a28e571c85b)
-tyling
+     ![Screenshot from 2025-06-17 10-55-11](https://github.com/user-attachments/assets/d49bd0f0-3425-48ad-ac32-7a28e571c85b)
+
 
 ## Installation
 
