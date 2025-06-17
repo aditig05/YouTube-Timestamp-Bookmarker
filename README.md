@@ -18,7 +18,10 @@ A Chrome extension that allows users to bookmark specific timestamps in YouTube 
 - Uses Chrome Storage API for persistent data storage
 - Implements content scripts for YouTube page interaction
 - Real-time communication between popup and content scripts
-- Responsive UI with modern CSS styling
+- Responsive UI with modern CSS s
+
+![Screenshot from 2025-06-17 10-55-11](https://github.com/user-attachments/assets/d49bd0f0-3425-48ad-ac32-7a28e571c85b)
+tyling
 
 ## Installation
 
