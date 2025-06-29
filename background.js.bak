@@ -1,0 +1,1017 @@
+// ==============================================
+// 1. Configuration & Constants
+// ==============================================
+const CONFIG = {
+    // API Configuration
+    HF_API_URL: 'https://api-inference.huggingface.co/models',
+    HF_MODELS: {
+        ZERO_SHOT: 'facebook/bart-large-mnli',
+        SUMMARIZATION: 'facebook/bart-large-cnn'
+    },
+    
+    // Default bookmark categories
+    DEFAULT_CATEGORIES: [
+        'Tutorial', 
+        'Key Concept', 
+        'Code Example', 
+        'Important Note',
+        'Question',
+        'Reference'
+    ],
+    
+    // Timing and caching
+    CACHE_TTL: 1000 * 60 * 60 * 24 * 7, // 1 week
+    NOTIFICATION_DURATION: 4000,
+    INACTIVE_TAB_TIMEOUT: 30 * 60 * 1000, // 30 minutes
+    TAB_CLEANUP_INTERVAL: 5 * 60 * 1000, // 5 minutes
+    CONTENT_SCRIPT_LOAD_DELAY: 500 // ms to wait for content script to initialize
+};
+
+// ==============================================
+// 2. Global State
+// ==============================================
+const state = {
+    // Cache for API responses
+    apiCache: new Map(),
+    
+    // Track active YouTube tabs with content scripts
+    activeYouTubeTabs: new Map(),
+    
+    // Extension state flags
+    isInitialized: false
+};
+
+// ==============================================
+// 3. Utility Functions
+// ==============================================
+
+/**
+ * Format time in seconds to HH:MM:SS or MM:SS
+ * @param {number} seconds - Time in seconds
+ * @returns {string} Formatted time string
+ */
+function formatTime(seconds) {
+    if (typeof seconds !== 'number' || isNaN(seconds) || seconds < 0) {
+        console.warn('Invalid time value:', seconds);
+        return '0:00';
+    }
+    
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    
+    if (hrs > 0) {
+        return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Show a notification to the user
+ * @param {string} message - The message to display
+ * @param {string} [type='info'] - The type of notification (info, success, error)
+ * @param {Object} [options] - Additional notification options
+ * @returns {Promise<string>} Notification ID
+ */
+async function showNotification(message, type = 'info', options = {}) {
+    // Default notification options
+    const notificationOptions = {
+        type: 'basic',
+        iconUrl: 'icon-48.png',
+        title: 'YouTube Timestamp Bookmarker',
+        message: message,
+        priority: 0,
+        ...options
+    };
+
+    // Set notification type-specific options
+    switch (type) {
+        case 'success':
+            notificationOptions.iconUrl = 'icon-48.png';
+            notificationOptions.title = 'Success';
+            break;
+        case 'error':
+            notificationOptions.iconUrl = 'icon-48.png';
+            notificationOptions.title = 'Error';
+            notificationOptions.buttons = notificationOptions.buttons || [{ title: 'View' }];
+            break;
+        default:
+            notificationOptions.iconUrl = 'icon-48.png';
+            notificationOptions.title = 'Info';
+    }
+
+    try {
+        const notificationId = await new Promise((resolve) => {
+            chrome.notifications.create('', notificationOptions, (id) => {
+                if (chrome.runtime.lastError) {
+                    console.error('Error creating notification:', chrome.runtime.lastError);
+                    resolve(null);
+                } else {
+                    resolve(id);
+                }
+            });
+        });
+        
+        return notificationId;
+    } catch (error) {
+        console.error('Error showing notification:', error);
+        return null;
+    }
+}
+
+/**
+ * Fallback function to categorize text based on keywords
+ * @param {string} text - The text to categorize
+ * @returns {{label: string, score: number}}
+ */
+function getBestMatchingCategory(text) {
+    const lowerText = text.toLowerCase();
+    const keywordMap = {
+        'tutorial': ['tutorial', 'how to', 'guide', 'step by step'],
+        'key concept': ['concept', 'idea', 'theory', 'principle', 'fundamental'],
+        'code example': ['code', 'example', 'snippet', 'function', 'class', 'import', 'def '],
+        'important note': ['important', 'note', 'remember', 'key takeaway', 'critical'],
+        'question': ['question', 'what is', 'why', 'how', 'when', 'where'],
+        'reference': ['reference', 'resource', 'link', 'documentation']
+    };
+
+    let bestMatch = { label: 'Note', score: 0 };
+    let maxScore = 0;
+
+    for (const [category, keywords] of Object.entries(keywordMap)) {
+        const score = keywords.reduce((count, keyword) => 
+            lowerText.includes(keyword) ? count + 1 : count, 0);
+        
+        if (score > maxScore) {
+            maxScore = score;
+            bestMatch = { label: category, score: score / keywords.length };
+        }
+    }
+
+    return bestMatch;
+}
+
+/**
+ * Generate a summary for the given text using Hugging Face summarization
+ * @param {string} text - The text to summarize
+ * @param {string} hfApiKey - Hugging Face API key
+ * @returns {Promise<string>}
+ */
+async function generateSummary(text, hfApiKey) {
+    if (!text || text.length < 50) return '';
+    
+    const cacheKey = `summary:${text.substring(0, 100)}`;
+    const cached = apiCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp) < CONFIG.CACHE_TTL) {
+        return cached.result;
+    }
+
+    try {
+        const response = await fetch(`${CONFIG.HF_API_URL}/${CONFIG.HF_MODELS.SUMMARIZATION}`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${hfApiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                inputs: text,
+                parameters: {
+                    max_length: 100,
+                    min_length: 20,
+                    do_sample: false
+                }
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Failed to generate summary');
+        }
+
+        const result = await response.json();
+        const summary = result[0]?.summary_text || '';
+
+        // Cache the result
+        apiCache.set(cacheKey, {
+            result: summary,
+            timestamp: Date.now()
+        });
+
+        return summary;
+    } catch (error) {
+        console.error('Error in generateSummary:', error);
+        // Fallback to first 100 chars if summary fails
+        return text.length > 100 ? text.substring(0, 100) + '...' : text;
+    }
+}
+
+// ==============================================
+// 3. Tab Management
+// ==============================================
+
+/**
+ * Track an active YouTube tab
+ * @param {number} tabId - The ID of the tab
+ * @param {string} url - The URL of the tab
+ */
+function trackYouTubeTab(tabId, url) {
+    state.activeYouTubeTabs.set(tabId, {
+        tabId,
+        url,
+        lastActive: Date.now()
+    });
+    updateBadge();
+}
+
+/**
+ * Untrack a YouTube tab
+ * @param {number} tabId - The ID of the tab to untrack
+ */
+function untrackYouTubeTab(tabId) {
+    if (state.activeYouTubeTabs.has(tabId)) {
+        state.activeYouTubeTabs.delete(tabId);
+        updateBadge();
+    }
+}
+
+/**
+ * Inject content script into a tab
+ * @param {number} tabId - The ID of the tab
+ * @returns {Promise<boolean>} Whether the injection was successful
+ */
+async function injectContentScript(tabId) {
+    try {
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            files: ['content.js']
+        });
+        return true;
+    } catch (error) {
+        console.error(`Error injecting content script into tab ${tabId}:`, error);
+        return false;
+    }
+}
+
+// ==============================================
+// 4. Message Handling
+// ==============================================
+
+/**
+ * Handle incoming messages from content scripts and popup
+ */
+function setupMessageHandlers() {
+    // Handle messages from content script or popup
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        console.log('Background received message from tab', sender.tab?.id, ':', request);
+        
+        // Handle content script ready notification
+        if (request.action === 'contentScriptReady' && sender.tab) {
+            console.log('Content script ready in tab:', sender.tab.id);
+            trackYouTubeTab(sender.tab.id, sender.tab.url);
+            return true;
+        }
+        
+        // Handle ping requests
+        if (request.action === 'ping') {
+            sendResponse({ status: 'alive' });
+            return true;
+        }
+        
+        // Handle processBookmark request
+        if (request.action === 'processBookmark') {
+            const { bookmark, hfApiKey } = request;
+            console.log('Processing bookmark:', bookmark);
+            
+            // Process the bookmark with AI if API key is provided
+            processBookmarkWithAI(bookmark, hfApiKey)
+                .then(result => {
+                    console.log('Bookmark processed successfully:', result);
+                    sendResponse({ success: true, ...result });
+                })
+                .catch(error => {
+                    console.error('Error processing bookmark:', error);
+                    sendResponse({ success: false, error: error.message });
+                });
+                
+            return true; // Keep the message channel open for async response
+        }
+        
+        // Handle getBookmarks request
+        if (request.action === 'getBookmarks') {
+            getBookmarks()
+                .then(bookmarks => sendResponse({ bookmarks }))
+                .catch(error => {
+                    console.error('Error getting bookmarks:', error);
+                    sendResponse({ error: 'Failed to get bookmarks' });
+                });
+            return true; // Keep the message channel open for async response
+        }
+        
+        // Handle addBookmark request (direct from popup)
+        if (request.action === 'addBookmark') {
+            addBookmark(request.bookmark, request.hfApiKey)
+                .then(result => sendResponse({ success: true, ...result }))
+                .catch(error => {
+                    console.error('Error adding bookmark:', error);
+                    sendResponse({ success: false, error: error.message });
+                });
+            return true; // Keep the message channel open for async response
+        }
+        
+        // Handle updateBookmark request
+        if (request.action === 'updateBookmark') {
+            updateBookmark(request.id, request.updates)
+                .then(() => sendResponse({ success: true }))
+                .catch(error => {
+                    console.error('Error updating bookmark:', error);
+                    sendResponse({ success: false, error: error.message });
+                });
+            return true; // Keep the message channel open for async response
+        }
+        
+        // Handle deleteBookmark request
+        if (request.action === 'deleteBookmark') {
+            deleteBookmark(request.id)
+                .then(() => sendResponse({ success: true }))
+                .catch(error => {
+                    console.error('Error deleting bookmark:', error);
+                    sendResponse({ success: false, error: error.message });
+                });
+            return true; // Keep the message channel open for async response
+        }
+        
+        // Handle getSettings request
+        if (request.action === 'getSettings') {
+            chrome.storage.sync.get(['settings'], (result) => {
+                sendResponse({ settings: result.settings || {} });
+            });
+            return true; // Keep the message channel open for async response
+        }
+        
+        // Handle saveSettings request
+        if (request.action === 'saveSettings') {
+            chrome.storage.sync.set({ settings: request.settings }, () => {
+                sendResponse({ success: true });
+            });
+            return true; // Keep the message channel open for async response
+        }
+        
+        // Handle getVideoInfo request
+        if (request.action === 'getVideoInfo') {
+            // Forward this to the active tab's content script
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                if (tabs[0] && tabs[0].id) {
+                    chrome.tabs.sendMessage(
+                        tabs[0].id, 
+                        { action: 'getVideoInfo' },
+                        (response) => {
+                            if (chrome.runtime.lastError) {
+                                console.error('Error getting video info:', chrome.runtime.lastError);
+                                sendResponse({ error: chrome.runtime.lastError.message });
+                                return;
+                            }
+                            sendResponse(response);
+                        }
+                    );
+                } else {
+                    sendResponse({ error: 'No active tab found' });
+                }
+            });
+            return true; // Keep the message channel open for async response
+        }
+        
+        // Handle jumpToTime request
+        if (request.action === 'jumpToTime' && request.time !== undefined) {
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                if (tabs[0] && tabs[0].id) {
+                    chrome.tabs.sendMessage(
+                        tabs[0].id, 
+                        { action: 'jumpToTime', time: request.time },
+                        (response) => {
+                            if (chrome.runtime.lastError) {
+                                console.error('Error jumping to time:', chrome.runtime.lastError);
+                                sendResponse({ error: chrome.runtime.lastError.message });
+                                return;
+                            }
+                            sendResponse(response);
+                        }
+                    );
+                } else {
+                    sendResponse({ error: 'No active tab found' });
+                }
+            });
+            return true; // Keep the message channel open for async response
+        }
+        
+        // Handle unknown actions
+        console.warn('Unknown action:', request.action);
+        sendResponse({ error: 'Unknown action' });
+        return true;
+        
+        // Handle ping from content script
+        if (request.action === 'ping') {
+            sendResponse({ status: 'pong' });
+            return true;
+        }
+        
+        // Handle content script ready notification
+        if (request.action === 'contentScriptReady') {
+            console.log('Content script ready in tab:', sender.tab?.id);
+            if (sender.tab?.id) {
+                activeYouTubeTabs.add(sender.tab.id);
+            }
+            sendResponse({ success: true });
+            return true;
+        }
+        
+        // Handle add bookmark request
+        if (request.action === 'addBookmark') {
+            // Ensure we have the required data
+            if (!request.data || !request.data.videoId || request.data.time === undefined) {
+                sendResponse({ 
+                    success: false, 
+                    error: 'Missing required bookmark data' 
+                });
+                return true;
+            }
+            
+            // Add bookmark with error handling
+            addBookmark(request.data, request.hfApiKey)
+                .then(result => {
+                    console.log('Bookmark added successfully:', result);
+                    sendResponse({ success: true, ...result });
+                })
+                .catch(error => {
+                    console.error('Error adding bookmark:', error);
+                    sendResponse({ 
+                        success: false, 
+                        error: error.message || 'Failed to add bookmark' 
+                    });
+                });
+                
+            return true; // Keep the message channel open for async response
+        } 
+        
+        // Handle get bookmarks request
+        else if (request.action === 'getBookmarks') {
+            getBookmarks()
+                .then(bookmarks => sendResponse({ success: true, bookmarks }))
+                .catch(error => {
+                    console.error('Error getting bookmarks:', error);
+                    sendResponse({ 
+                        success: false, 
+                        error: error.message || 'Failed to get bookmarks' 
+                    });
+                });
+            return true; // Keep the message channel open for async response
+        } 
+        
+        // Handle delete bookmark request
+        else if (request.action === 'deleteBookmark') {
+            if (!request.id) {
+                sendResponse({ success: false, error: 'Bookmark ID is required' });
+                return true;
+            }
+            
+            deleteBookmark(request.id)
+                .then(() => sendResponse({ success: true }))
+                .catch(error => {
+                    console.error('Error deleting bookmark:', error);
+                    sendResponse({ 
+                        success: false, 
+                        error: error.message || 'Failed to delete bookmark' 
+                    });
+                });
+            return true;
+        } 
+        
+        // Handle clear bookmarks request
+        else if (request.action === 'clearBookmarks') {
+            clearBookmarks()
+                .then(() => sendResponse({ success: true }))
+                .catch(error => {
+                    console.error('Error clearing bookmarks:', error);
+                    sendResponse({ 
+                        success: false, 
+                        error: error.message || 'Failed to clear bookmarks' 
+                    });
+                });
+            return true;
+        } 
+        
+        // Handle jump to time request
+        else if (request.action === 'jumpToTime' && request.time !== undefined) {
+            if (!sender.tab) {
+                sendResponse({ success: false, error: 'No active tab found' });
+                return true;
+            }
+            
+            chrome.tabs.sendMessage(sender.tab.id, {
+                action: 'jumpToTime',
+                time: request.time
+            });
+            sendResponse({ success: true });
+            return true;
+        }
+        
+        // Unknown action
+        sendResponse({ 
+            success: false, 
+            error: `Unknown action: ${request.action}` 
+        });
+        return false;
+    });
+}
+
+// ==============================================
+// 7. Initialization
+// ==============================================
+
+/**
+ * Initialize the extension
+ */
+function initializeExtension() {
+    if (state.isInitialized) {
+        console.log('Extension already initialized');
+        return;
+    }
+    
+    console.log('Initializing YouTube Timestamp Bookmarker...');
+    
+    try {
+        // Set up event listeners
+        setupMessageHandlers();
+        setupCommandHandlers();
+        setupTabUpdateHandlers();
+        setupNotificationHandlers();
+        setupTabCleanup();
+        
+        // Initialize badge on startup
+        updateBadge();
+        
+        // Check for existing YouTube tabs and inject content scripts
+        chrome.tabs.query({ url: '*://*.youtube.com/watch*' }, (tabs) => {
+            tabs.forEach(tab => {
+                if (tab.id) {
+                    injectContentScript(tab.id).then(() => {
+                        trackYouTubeTab(tab.id, tab.url || '');
+                    });
+                }
+            });
+        });
+        
+        state.isInitialized = true;
+        console.log('Extension initialized successfully');
+        
+    } catch (error) {
+        console.error('Error initializing extension:', error);
+        showNotification('Failed to initialize extension. Please refresh the page.', 'error');
+    }
+}
+
+// Initialize when the extension is installed or updated
+chrome.runtime.onInstalled.addListener((details) => {
+    console.log('Extension installed/updated:', details.reason);
+    initializeExtension();
+});
+
+// Initialize when the extension starts up
+chrome.runtime.onStartup.addListener(() => {
+    console.log('Browser started, initializing extension...');
+    initializeExtension();
+});
+
+// Initialize when the service worker wakes up
+if (chrome.runtime.id) {
+    console.log('Service worker starting...');
+    try {
+        // Add a small delay to ensure the service worker is fully initialized
+        setTimeout(() => {
+            initializeExtension().catch(error => {
+                console.error('Error during extension initialization:', error);
+            });
+        }, 100);
+    } catch (error) {
+        console.error('Error in service worker startup:', error);
+    }
+}
+
+// Track active YouTube tabs with content scripts
+const activeYouTubeTabs = new Set();
+
+// ==============================================
+// 5. Command Handlers
+// ==============================================
+
+/**
+ * Handle keyboard shortcut commands
+ */
+function setupCommandHandlers() {
+    chrome.commands.onCommand.addListener(async (command) => {
+    if (command === 'add-bookmark') {
+        try {
+            // Get the active tab
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            
+            // Check if we have a valid tab
+            if (!tab || !tab.id) {
+                console.error('No active tab found');
+                showNotification('No active tab found', 'error');
+                return;
+            }
+            
+            // Check if we're on a YouTube video page
+            if (!tab.url || !tab.url.includes('youtube.com/watch')) {
+                console.log('Not a YouTube video page');
+                showNotification('Please navigate to a YouTube video first', 'error');
+                return;
+            }
+            
+            console.log('Keyboard shortcut triggered in tab:', tab.id);
+            
+            // Inject content script if not already injected
+            if (!activeYouTubeTabs.has(tab.id)) {
+                console.log(`Content script not found in tab ${tab.id}, injecting...`);
+                try {
+                    await chrome.scripting.executeScript({
+                        target: { tabId: tab.id },
+                        files: ['content.js']
+                    });
+                    console.log('Content script injected successfully');
+                    
+                    // Add to active tabs
+                    activeYouTubeTabs.set(tab.id, {
+                        tabId: tab.id,
+                        url: tab.url,
+                        lastActive: Date.now()
+                    });
+                    
+                    // Give the content script a moment to initialize
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                } catch (error) {
+                    console.error('Error injecting content script:', error);
+                    showNotification('Failed to initialize extension. Please refresh the page and try again.', 'error');
+                    return;
+                }
+            }
+            
+            // Get settings for API key
+            const { settings } = await new Promise(resolve => {
+                chrome.storage.sync.get(['settings'], resolve);
+            });
+            
+            // Send message to content script
+            console.log(`Sending addBookmark message to tab: ${tab.id}`);
+            const response = await new Promise((resolve) => {
+                chrome.tabs.sendMessage(
+                    tab.id, 
+                    { 
+                        action: 'addBookmark',
+                        timestamp: Date.now(),
+                        hfApiKey: settings?.hfApiKey
+                    },
+                    (response) => {
+                        if (chrome.runtime.lastError) {
+                            console.error('Error sending message to content script:', chrome.runtime.lastError);
+                            resolve({ success: false, error: chrome.runtime.lastError.message });
+                            return;
+                        }
+                        resolve(response || { success: false, error: 'No response from content script' });
+                    }
+                );
+            });
+            
+            if (!response.success) {
+                throw new Error(response.error || 'Failed to add bookmark');
+            }
+            
+            console.log('Bookmark added successfully:', response);
+            showNotification('Bookmark added successfully!');
+            
+        } catch (error) {
+            console.error('Error in command handler:', error);
+            showNotification(`Error: ${error.message}`, 'error');
+        }
+    }
+});
+
+// ==============================================
+// 6. Tab Event Handlers
+// ==============================================
+
+/**
+ * Handle tab updates (page navigation)
+ */
+function setupTabUpdateHandlers() {
+    // Clean up when tabs are closed
+    chrome.tabs.onRemoved.addListener((tabId) => {
+        untrackYouTubeTab(tabId);
+    });
+
+    // Handle tab URL changes and content script injection
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+        if (changeInfo.status === 'complete' && tab.url && tab.url.includes('youtube.com/watch')) {
+            // If we already have this tab, update its URL and timestamp
+            if (state.activeYouTubeTabs.has(tabId)) {
+                const tabData = state.activeYouTubeTabs.get(tabId);
+                tabData.url = tab.url;
+                tabData.lastActive = Date.now();
+            } else {
+                // Otherwise, inject the content script
+                injectContentScript(tabId).then(() => {
+                    trackYouTubeTab(tabId, tab.url);
+                });
+            }
+        } else if (changeInfo.status === 'complete') {
+            // If the tab is no longer a YouTube video page, remove it from active tabs
+            untrackYouTubeTab(tabId);
+        }
+    });
+}
+
+/**
+ * Clean up inactive tabs periodically
+ */
+function setupTabCleanup() {
+    setInterval(() => {
+        const now = Date.now();
+        
+        for (const [tabId, tabData] of state.activeYouTubeTabs.entries()) {
+            if (now - tabData.lastActive > CONFIG.INACTIVE_TAB_TIMEOUT) {
+                state.activeYouTubeTabs.delete(tabId);
+            }
+        }
+        
+        updateBadge();
+    }, CONFIG.TAB_CLEANUP_INTERVAL);
+}
+
+// Storage functions
+async function getBookmarks() {
+    const result = await chrome.storage.local.get(['bookmarks']);
+    return Array.isArray(result.bookmarks) ? result.bookmarks : [];
+}
+
+async function saveBookmarks(bookmarks) {
+    await chrome.storage.local.set({ bookmarks });
+    await updateBadge(bookmarks.length);
+    return bookmarks;
+}
+
+/**
+ * Add a new bookmark with AI-powered categorization and summarization
+ * @param {Object} bookmarkData - The bookmark data
+ * @param {string} [hfApiKey] - Optional Hugging Face API key
+ * @returns {Promise<{bookmark: Object, category: string, summary: string}>}
+ */
+async function addBookmark(bookmarkData, hfApiKey) {
+    try {
+        const { videoId, title, url, time, transcript = '' } = bookmarkData;
+        
+        // Validate required fields
+        if (!videoId || time === undefined) {
+            throw new Error('Missing required bookmark data');
+        }
+
+        // Get existing bookmarks
+        const result = await chrome.storage.local.get(['bookmarks']);
+        const bookmarks = Array.isArray(result.bookmarks) ? result.bookmarks : [];
+        
+        // Check for duplicate bookmarks (same video and time within 5 seconds)
+        const existingBookmark = bookmarks.find(b => 
+            b.videoId === videoId && Math.abs(b.time - time) < 5
+        );
+        
+        if (existingBookmark) {
+            return { 
+                bookmark: existingBookmark,
+                isDuplicate: true,
+                message: 'Bookmark already exists at this timestamp'
+            };
+        }
+
+        // Prepare text for AI processing
+        const textToAnalyze = [
+            title,
+            transcript,
+            `Timestamp: ${formatTime(time)}`
+        ].filter(Boolean).join('\n');
+
+        let category = 'Note';
+        let summary = '';
+
+        try {
+            // Only use AI if API key is provided
+            if (hfApiKey) {
+                // Get category using zero-shot classification
+                const classification = await classifyText(textToAnalyze, hfApiKey);
+                if (classification && classification.score > 0.3) { // Only use if confident enough
+                    category = classification.label;
+                }
+
+                // Generate summary if we have enough text
+                if (transcript.length > 50) {
+                    summary = await generateSummary(transcript, hfApiKey);
+                }
+            } else {
+                // Fallback to simple keyword matching
+                const fallbackCategory = getBestMatchingCategory(textToAnalyze);
+                if (fallbackCategory.score > 0) {
+                    category = fallbackCategory.label;
+                }
+                
+                // Simple summary fallback
+                if (transcript) {
+                    summary = transcript.length > 100 
+                        ? transcript.substring(0, 100) + '...' 
+                        : transcript;
+                }
+            }
+        } catch (aiError) {
+            console.warn('AI processing failed, using fallback:', aiError);
+            // Continue with fallback values
+        }
+        
+        // Create a new bookmark
+        const newBookmark = {
+            id: `${videoId}-${Date.now()}`,
+            videoId,
+            title: title || 'Untitled',
+            url: url || `https://www.youtube.com/watch?v=${videoId}`,
+            time,
+            category,
+            note: summary,
+            transcript,
+            createdAt: new Date().toISOString()
+        };
+        
+        // Add the new bookmark to the beginning of the array
+        bookmarks.unshift(newBookmark);
+        
+        // Save back to storage
+        await chrome.storage.local.set({ bookmarks });
+        
+        // Update the badge count
+        updateBadge(bookmarks.length);
+        
+        // Send notification
+        chrome.notifications.create({
+            type: 'basic',
+            iconUrl: 'icon.png',
+            title: 'Bookmark Added',
+            message: `[${category}] ${title || 'Untitled'} (${formatTime(time)})`,
+            buttons: [{ title: 'View' }]
+        });
+        
+        console.log('Bookmark added:', newBookmark);
+        
+        return {
+            bookmark: newBookmark,
+            category,
+            summary,
+            isNew: true
+        };
+    } catch (error) {
+        console.error('Error adding bookmark:', error);
+        throw error;
+    }
+}
+
+async function updateBookmark(id, updates) {
+    const bookmarks = await getBookmarks();
+    const index = bookmarks.findIndex(b => b.id === id);
+    
+    if (index === -1) {
+        throw new Error('Bookmark not found');
+    }
+    
+    bookmarks[index] = { ...bookmarks[index], ...updates, updatedAt: new Date().toISOString() };
+    await saveBookmarks(bookmarks);
+    return bookmarks[index];
+}
+
+async function deleteBookmark(id) {
+    const bookmarks = await getBookmarks();
+    const filtered = bookmarks.filter(b => b.id !== id);
+    
+    if (filtered.length === bookmarks.length) {
+        throw new Error('Bookmark not found');
+    }
+    
+    await saveBookmarks(filtered);
+    return true;
+}
+
+// Update extension badge with bookmark count
+async function updateBadge() {
+    try {
+        const bookmarks = await getBookmarks();
+        const count = bookmarks.length;
+        const text = count > 0 ? (count > 999 ? '999+' : count.toString()) : '';
+        
+        await chrome.action.setBadgeText({ text });
+        await chrome.action.setBadgeBackgroundColor({ 
+            color: count > 0 ? '#4CAF50' : '#9E9E9E' 
+        });
+        
+        // Update badge title with count
+        await chrome.action.setTitle({
+            title: count === 0 
+                ? 'No bookmarks yet' 
+                : `${count} bookmark${count === 1 ? '' : 's'} saved`
+        });
+        
+    } catch (error) {
+        console.error('Error updating badge:', error);
+        // Reset badge on error
+        await chrome.action.setBadgeText({ text: '' });
+    }
+}
+
+// Format time in seconds to HH:MM:SS or MM:SS
+function formatTime(seconds) {
+    const date = new Date(0);
+    date.setSeconds(seconds);
+    const timeString = date.toISOString().substr(11, 8);
+    
+    // Remove leading zeros and handle hours
+    const parts = timeString.split(':');
+    if (parts[0] === '00') {
+        return parts[1] + ':' + parts[2]; // MM:SS
+    }
+    return parts.join(':'); // HH:MM:SS
+}
+
+// ==============================================
+// 8. Notification Handlers
+// ==============================================
+
+/**
+ * Handle notification button clicks
+ */
+function setupNotificationHandlers() {
+    chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) => {
+        if (buttonIndex === 0) { // View button
+            chrome.action.openPopup().catch(error => {
+                console.error('Error opening popup:', error);
+            });
+        }
+    });
+    
+    // Handle notification closed event
+    chrome.notifications.onClosed.addListener((notificationId, byUser) => {
+        // Clean up any resources associated with this notification
+        console.log(`Notification ${notificationId} was ${byUser ? 'closed by user' : 'closed by system'}`);
+    });
+}
+
+// ==============================================
+// 9. Error Handling
+// ==============================================
+
+/**
+ * Handle unhandled promise rejections
+ */
+function setupErrorHandlers() {
+    window.addEventListener('unhandledrejection', (event) => {
+        console.error('Unhandled promise rejection:', event.reason);
+        showNotification('An unexpected error occurred. Please try again.', 'error');
+    });
+    
+    window.addEventListener('error', (event) => {
+        console.error('Uncaught error:', event.error);
+        showNotification('An unexpected error occurred. Please refresh the page.', 'error');
+    });
+}
+
+// ==============================================
+// 10. Public API
+// ==============================================
+
+// Export public functions if needed for testing or other contexts
+if (typeof module !== 'undefined' && module.exports) {
+    // Node.js/CommonJS
+    module.exports = {
+        formatTime,
+        showNotification,
+        initializeExtension,
+        // Add other functions that should be publicly available
+    };
+} else if (typeof window !== 'undefined') {
+    // Browser/Extension context
+    window.YouTubeBookmarker = {
+        formatTime,
+        showNotification,
+        initializeExtension,
+        // Add other functions that should be publicly available
+    };
+}
+
+// Handle notification clicks
+chrome.notifications.onClicked.addListener(() => {
+    // Focus on the extension popup
+    chrome.action.openPopup();
+});
+
+// Initialize the extension when loaded
+initializeExtension();

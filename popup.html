@@ -11,8 +11,14 @@
             <div id="bookmarksList"></div>
         </div>
         <div class="controls">
-            <button id="addBookmark" class="btn">Add Current Timestamp</button>
-            <button id="clearBookmarks" class="btn danger">Clear All</button>
+            <textarea id="bookmarkNote" placeholder="Add a note for this bookmark..." rows="3" style="width: 100%; margin-bottom: 10px; resize: vertical;"></textarea>
+            <div class="button-group">
+                <button id="addBookmark" class="btn">Add Current Timestamp</button>
+                <button id="exportBookmarks" class="btn secondary" title="Export to Excel">
+                    <span class="export-icon">&#x1F4CA;</span> Export
+                </button>
+                <button id="clearBookmarks" class="btn danger">Clear All</button>
+            </div>
         </div>
     </div>
     <script src="popup.js"></script>
