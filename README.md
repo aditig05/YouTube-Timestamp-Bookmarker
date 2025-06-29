@@ -20,6 +20,16 @@ A Chrome extension that enhances your YouTube experience by allowing you to book
    git clone https://github.com/yourusername/YouTube-Timestamp-Bookmarker.git
    ```
 
+## 🛠️ Technical Details
+
+- Built using vanilla JavaScript and Chrome Extension APIs
+- Uses Chrome Storage API for persistent data storage
+- Implements content scripts for YouTube page interaction
+- Real-time communication between popup and content scripts
+- Responsive UI with modern CSS styling
+
+![Screenshot from 2025-06-17 10-55-11](https://github.com/user-attachments/assets/d49bd0f0-3425-48ad-ac32-7a28e571c85b)
+
 2. **Load the extension in Chrome**
    - Open Chrome and go to `chrome://extensions/`
    - Enable "Developer mode" in the top-right corner
@@ -49,6 +59,7 @@ A Chrome extension that enhances your YouTube experience by allowing you to book
 2. A TSV (tab-separated values) file will be downloaded
 3. Open the file in Excel, Google Sheets, or any spreadsheet application
 
+<<<<<<< HEAD
 ## 🛠 Technical Details
 
 - **Frontend**: Vanilla JavaScript, HTML5, CSS3
@@ -80,3 +91,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Built for YouTube content creators and learners
 - Inspired by the need for better video note-taking tools
 - Uses Chrome Extension best practices for optimal performance and security
+=======
+MIT License 
+>>>>>>> origin/main
